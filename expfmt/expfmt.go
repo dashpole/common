@@ -111,6 +111,9 @@ func NewFormat(t FormatType) Format {
 
 // NewOpenMetricsFormat generates a new OpenMetrics format matching the
 // specified version number.
+//
+// Note: OpenMetrics 2.0.0 is experimental and currently supports encoding only
+// (Counter, Gauge, and Untyped metric types). Decoding is not supported.
 func NewOpenMetricsFormat(version string) (Format, error) {
 	if version == OpenMetricsVersion_0_0_1 {
 		return FmtOpenMetrics_0_0_1, nil

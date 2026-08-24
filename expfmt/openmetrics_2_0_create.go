@@ -31,8 +31,11 @@ import (
 // It returns the number of bytes written and any error encountered.
 //
 // NOTE: This method implements OpenMetrics 2.0-rc.0 which is experimental.
+// It currently supports encoding only for Counter, Gauge, and Untyped metric types.
 // Breaking changes might happen in the future. This implementation is still a
 // work-in-progress, and does not yet support all features of the format.
+// EncoderOptions are accepted for signature compatibility with OpenMetrics 1.0,
+// but are currently ignored.
 func MetricFamilyToOpenMetrics20(out io.Writer, in *dto.MetricFamily, options ...EncoderOption) (written int, err error) {
 	_ = options
 	name := in.GetName()
@@ -41,6 +44,9 @@ func MetricFamilyToOpenMetrics20(out io.Writer, in *dto.MetricFamily, options ..
 	}
 	if containsRawNewline(name) {
 		return 0, fmt.Errorf("MetricFamily name %q contains raw newlines", name)
+	}
+	if in.Unit != nil && containsRawNewline(*in.Unit) {
+		return 0, fmt.Errorf("unit %q contains raw newlines", *in.Unit)
 	}
 
 	// Try the interface upgrade. If it doesn't work, we'll use a
@@ -170,17 +176,17 @@ func MetricFamilyToOpenMetrics20(out io.Writer, in *dto.MetricFamily, options ..
 			if val < 0 {
 				return written, fmt.Errorf("counter value cannot be negative (%g) in metric %s", val, name)
 			}
-			n, err = writeOpenMetrics20Sample(w, name, metric, val, 0, false, metric.Counter.Exemplar)
+			n, err = writeOpenMetrics20Sample(w, name, metric, val, 0, false, metric.Counter.CreatedTimestamp, metric.Counter.Exemplar)
 		case dto.MetricType_GAUGE:
 			if metric.Gauge == nil {
 				return written, fmt.Errorf("expected gauge in metric %s %s", name, metric)
 			}
-			n, err = writeOpenMetrics20Sample(w, name, metric, metric.Gauge.GetValue(), 0, false, nil)
+			n, err = writeOpenMetrics20Sample(w, name, metric, metric.Gauge.GetValue(), 0, false, nil, nil)
 		case dto.MetricType_UNTYPED:
 			if metric.Untyped == nil {
 				return written, fmt.Errorf("expected untyped in metric %s %s", name, metric)
 			}
-			n, err = writeOpenMetrics20Sample(w, name, metric, metric.Untyped.GetValue(), 0, false, nil)
+			n, err = writeOpenMetrics20Sample(w, name, metric, metric.Untyped.GetValue(), 0, false, nil, nil)
 		case dto.MetricType_SUMMARY:
 			if metric.Summary == nil {
 				return written, fmt.Errorf("expected summary in metric %s %s", name, metric)
@@ -203,7 +209,7 @@ func MetricFamilyToOpenMetrics20(out io.Writer, in *dto.MetricFamily, options ..
 }
 
 // writeOpenMetrics20Sample writes a single sample for simple types (Counter, Gauge, Untyped).
-func writeOpenMetrics20Sample(w enhancedWriter, name string, metric *dto.Metric, floatValue float64, intValue uint64, useIntValue bool, exemplar *dto.Exemplar) (int, error) {
+func writeOpenMetrics20Sample(w enhancedWriter, name string, metric *dto.Metric, floatValue float64, intValue uint64, useIntValue bool, startTimestamp *timestamppb.Timestamp, exemplar *dto.Exemplar) (int, error) {
 	if err := validateLabels20(metric.Label); err != nil {
 		return 0, err
 	}
@@ -222,7 +228,7 @@ func writeOpenMetrics20Sample(w enhancedWriter, name string, metric *dto.Metric,
 	if useIntValue {
 		n, err = writeUint(w, intValue)
 	} else {
-		n, err = writeFloat(w, floatValue)
+		n, err = writeOpenMetricsFloat(w, floatValue)
 	}
 	written += n
 	if err != nil {
@@ -242,10 +248,9 @@ func writeOpenMetrics20Sample(w enhancedWriter, name string, metric *dto.Metric,
 		}
 	}
 
-	// Start Timestamp for Counter
-	if metric.Counter != nil && metric.Counter.CreatedTimestamp != nil {
-		ts := metric.Counter.CreatedTimestamp
-		if err := ts.CheckValid(); err != nil {
+	// Start Timestamp (e.g. for Counter)
+	if startTimestamp != nil {
+		if err := startTimestamp.CheckValid(); err != nil {
 			return written, fmt.Errorf("invalid created timestamp in metric %s: %w", name, err)
 		}
 		n, err = w.WriteString(" st@")
@@ -253,7 +258,7 @@ func writeOpenMetrics20Sample(w enhancedWriter, name string, metric *dto.Metric,
 		if err != nil {
 			return written, err
 		}
-		n, err = writeProtoTimestamp(w, ts)
+		n, err = writeProtoTimestamp(w, startTimestamp)
 		written += n
 		if err != nil {
 			return written, err
@@ -277,13 +282,13 @@ func writeOpenMetrics20Sample(w enhancedWriter, name string, metric *dto.Metric,
 }
 
 // writeExemplar20 writes the provided exemplar in OpenMetrics 2.0 format to w.
-// In OpenMetrics 2.0, exemplars without a timestamp are dropped.
+// In OpenMetrics 2.0, exemplars without a timestamp or invalid exemplars are dropped.
 func writeExemplar20(w enhancedWriter, e *dto.Exemplar) (int, error) {
 	if e == nil || e.Timestamp == nil {
 		return 0, nil
 	}
 	if err := validateExemplar20(e); err != nil {
-		return 0, err
+		return 0, nil
 	}
 	written := 0
 	n, err := w.WriteString(" # ")
@@ -305,17 +310,13 @@ func writeExemplar20(w enhancedWriter, e *dto.Exemplar) (int, error) {
 	if err != nil {
 		return written, err
 	}
-	n, err = writeFloat(w, e.GetValue())
+	n, err = writeOpenMetricsFloat(w, e.GetValue())
 	written += n
 	if err != nil {
 		return written, err
 	}
 	err = w.WriteByte(' ')
 	written++
-	if err != nil {
-		return written, err
-	}
-	err = e.Timestamp.CheckValid()
 	if err != nil {
 		return written, err
 	}
@@ -330,20 +331,11 @@ func writeExemplar20(w enhancedWriter, e *dto.Exemplar) (int, error) {
 
 // writeOpenMetrics20Timestamp writes a float64 as a timestamp without scientific notation.
 func writeOpenMetrics20Timestamp(w enhancedWriter, f float64) (int, error) {
-	switch {
-	case math.IsNaN(f):
-		return w.WriteString("NaN")
-	case math.IsInf(f, +1):
-		return w.WriteString("+Inf")
-	case math.IsInf(f, -1):
-		return w.WriteString("-Inf")
-	default:
-		bp := numBufPool.Get().(*[]byte)
-		*bp = strconv.AppendFloat((*bp)[:0], f, 'f', -1, 64)
-		written, err := w.Write(*bp)
-		numBufPool.Put(bp)
-		return written, err
-	}
+	bp := numBufPool.Get().(*[]byte)
+	*bp = strconv.AppendFloat((*bp)[:0], f, 'f', -1, 64)
+	written, err := w.Write(*bp)
+	numBufPool.Put(bp)
+	return written, err
 }
 
 // Stubs for Summary and Histogram
@@ -384,6 +376,9 @@ func containsRawNewline(s string) bool {
 }
 
 func validateExemplar20(e *dto.Exemplar) error {
+	if e.Timestamp == nil {
+		return errors.New("missing exemplar timestamp")
+	}
 	if err := e.Timestamp.CheckValid(); err != nil {
 		return err
 	}
@@ -394,20 +389,37 @@ func writeProtoTimestamp(w enhancedWriter, ts *timestamppb.Timestamp) (int, erro
 	if err := ts.CheckValid(); err != nil {
 		return 0, err
 	}
-	n, err := writeInt(w, ts.Seconds)
+	sec := ts.Seconds
+	nanos := int64(ts.Nanos)
+	if sec < 0 && nanos > 0 {
+		sec++
+		nanos = int64(1e9) - nanos
+		if sec == 0 {
+			n, err := w.WriteString("-0")
+			if err != nil {
+				return n, err
+			}
+			return writeNanos(w, n, nanos)
+		}
+	}
+	n, err := writeInt(w, sec)
 	if err != nil {
 		return n, err
 	}
-	if ts.Nanos == 0 {
+	if nanos == 0 {
 		return n, nil
 	}
-	err = w.WriteByte('.')
+	return writeNanos(w, n, nanos)
+}
+
+func writeNanos(w enhancedWriter, n int, nanos int64) (int, error) {
+	err := w.WriteByte('.')
 	n++
 	if err != nil {
 		return n, err
 	}
 	bp := numBufPool.Get().(*[]byte)
-	*bp = strconv.AppendInt((*bp)[:0], int64(ts.Nanos), 10)
+	*bp = strconv.AppendInt((*bp)[:0], nanos, 10)
 	pad := 9 - len(*bp)
 	for range pad {
 		err = w.WriteByte('0')

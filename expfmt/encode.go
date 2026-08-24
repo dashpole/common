@@ -16,8 +16,8 @@ package expfmt
 import (
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
-	"strings"
 
 	"github.com/munnerz/goautoneg"
 	dto "github.com/prometheus/client_model/go"
@@ -206,7 +206,8 @@ func NewEncoder(w io.Writer, format Format, options ...EncoderOption) Encoder {
 			close: func() error { return nil },
 		}
 	case TypeOpenMetrics:
-		if strings.Contains(string(format), "version="+OpenMetricsVersion_2_0_0) {
+		_, params, _ := mime.ParseMediaType(string(format))
+		if params["version"] == OpenMetricsVersion_2_0_0 {
 			return encoderCloser{
 				encode: func(v *dto.MetricFamily) error {
 					_, err := MetricFamilyToOpenMetrics20(w, model.EscapeMetricFamily(v, escapingScheme), options...)

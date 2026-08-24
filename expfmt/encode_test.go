@@ -547,3 +547,37 @@ func TestDottedEncode(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenMetrics20Encoder(t *testing.T) {
+	format, err := NewOpenMetricsFormat("2.0.0")
+	require.NoError(t, err)
+
+	metric := &dto.MetricFamily{
+		Name: proto.String("http_requests_total"),
+		Help: proto.String("Total number of HTTP requests."),
+		Type: dto.MetricType_COUNTER.Enum(),
+		Metric: []*dto.Metric{
+			{
+				Counter: &dto.Counter{
+					Value: proto.Float64(1027),
+				},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	enc := NewEncoder(&buf, format)
+	err = enc.Encode(metric)
+	require.NoError(t, err)
+	closer, ok := enc.(Closer)
+	require.True(t, ok)
+	err = closer.Close()
+	require.NoError(t, err)
+
+	expected := `# HELP http_requests_total Total number of HTTP requests.
+# TYPE http_requests_total counter
+http_requests_total 1027.0
+# EOF
+`
+	require.Equal(t, expected, buf.String())
+}

@@ -577,3 +577,14 @@ func TestTextDecoderWithBufioReader(t *testing.T) {
 	}
 	require.Truef(t, decoded, "Metric foo not decoded")
 }
+
+func TestOpenMetrics20Decoder_Unsupported(t *testing.T) {
+	format, err := NewOpenMetricsFormat("2.0.0")
+	require.NoError(t, err)
+
+	dec := NewDecoder(strings.NewReader(""), format)
+	var mf dto.MetricFamily
+	err = dec.Decode(&mf)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "format application/openmetrics-text; version=2.0.0; charset=utf-8 not supported for decoding")
+}

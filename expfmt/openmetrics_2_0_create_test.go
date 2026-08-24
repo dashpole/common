@@ -52,7 +52,7 @@ func TestCreateOpenMetrics20(t *testing.T) {
 			},
 			out: `# HELP http_requests_total Total number of HTTP requests.
 # TYPE http_requests_total counter
-http_requests_total{method="GET",code="200"} 1027 st@1234567890
+http_requests_total{method="GET",code="200"} 1027.0 st@1234567890
 `,
 		},
 		{
@@ -76,7 +76,31 @@ http_requests_total{method="GET",code="200"} 1027 st@1234567890
 			},
 			out: `# HELP http_requests_total Total number of HTTP requests.
 # TYPE http_requests_total counter
-http_requests_total{method="GET",code="200"} 1027 st@1234567890.987654321
+http_requests_total{method="GET",code="200"} 1027.0 st@1234567890.987654321
+`,
+		},
+		{
+			name: "CounterWithPreEpochCreatedTimestamp",
+			in: &dto.MetricFamily{
+				Name: proto.String("http_requests_total"),
+				Help: proto.String("Total number of HTTP requests."),
+				Type: dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{
+					{
+						Label: []*dto.LabelPair{
+							{Name: proto.String("method"), Value: proto.String("GET")},
+							{Name: proto.String("code"), Value: proto.String("200")},
+						},
+						Counter: &dto.Counter{
+							Value:            proto.Float64(1027),
+							CreatedTimestamp: &timestamppb.Timestamp{Seconds: -1, Nanos: 500000000},
+						},
+					},
+				},
+			},
+			out: `# HELP http_requests_total Total number of HTTP requests.
+# TYPE http_requests_total counter
+http_requests_total{method="GET",code="200"} 1027.0 st@-0.5
 `,
 		},
 		{
@@ -138,6 +162,46 @@ node_memory_active_bytes 1.2345e+09 1234567890
 `,
 		},
 		{
+			name: "GaugeWithCounterCreatedTimestampDoesNotLeak",
+			in: &dto.MetricFamily{
+				Name: proto.String("node_memory_active_bytes"),
+				Type: dto.MetricType_GAUGE.Enum(),
+				Metric: []*dto.Metric{
+					{
+						Gauge: &dto.Gauge{
+							Value: proto.Float64(1.2345e+09),
+						},
+						Counter: &dto.Counter{
+							CreatedTimestamp: &timestamppb.Timestamp{Seconds: 1234567890},
+						},
+					},
+				},
+			},
+			out: `# TYPE node_memory_active_bytes gauge
+node_memory_active_bytes 1.2345e+09
+`,
+		},
+		{
+			name: "UntypedWithCounterCreatedTimestampDoesNotLeak",
+			in: &dto.MetricFamily{
+				Name: proto.String("test_metric"),
+				Type: dto.MetricType_UNTYPED.Enum(),
+				Metric: []*dto.Metric{
+					{
+						Untyped: &dto.Untyped{
+							Value: proto.Float64(1.23),
+						},
+						Counter: &dto.Counter{
+							CreatedTimestamp: &timestamppb.Timestamp{Seconds: 1234567890},
+						},
+					},
+				},
+			},
+			out: `# TYPE test_metric unknown
+test_metric 1.23
+`,
+		},
+		{
 			name: "CounterWithExemplar",
 			in: &dto.MetricFamily{
 				Name: proto.String("http_requests_total"),
@@ -160,7 +224,7 @@ node_memory_active_bytes 1.2345e+09 1234567890
 				},
 			},
 			out: `# TYPE http_requests_total counter
-http_requests_total 1027 1234567891 st@1234567890 # {trace_id="1234"} 1 1234567890.5
+http_requests_total 1027.0 1234567891 st@1234567890 # {trace_id="1234"} 1.0 1234567890.5
 `,
 		},
 		{
@@ -181,7 +245,7 @@ http_requests_total 1027 1234567891 st@1234567890 # {trace_id="1234"} 1 12345678
 				},
 			},
 			out: `# TYPE http_requests_total counter
-http_requests_total 1027 # {} 1 1234567890.5
+http_requests_total 1027.0 # {} 1.0 1234567890.5
 `,
 		},
 		{
@@ -204,7 +268,57 @@ http_requests_total 1027 # {} 1 1234567890.5
 				},
 			},
 			out: `# TYPE http_requests_total counter
-http_requests_total 1027
+http_requests_total 1027.0
+`,
+		},
+		{
+			name: "CounterWithInvalidExemplarTimestampDropped",
+			in: &dto.MetricFamily{
+				Name: proto.String("http_requests_total"),
+				Type: dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{
+					{
+						Counter: &dto.Counter{
+							Value: proto.Float64(1027),
+							Exemplar: &dto.Exemplar{
+								Label: []*dto.LabelPair{
+									{Name: proto.String("trace_id"), Value: proto.String("1234")},
+								},
+								Value: proto.Float64(1),
+								Timestamp: &timestamppb.Timestamp{
+									Nanos: -1,
+								},
+							},
+						},
+					},
+				},
+			},
+			out: `# TYPE http_requests_total counter
+http_requests_total 1027.0
+`,
+		},
+		{
+			name: "CounterWithInvalidExemplarLabelDropped",
+			in: &dto.MetricFamily{
+				Name: proto.String("http_requests_total"),
+				Type: dto.MetricType_COUNTER.Enum(),
+				Metric: []*dto.Metric{
+					{
+						Counter: &dto.Counter{
+							Value: proto.Float64(1027),
+							Exemplar: &dto.Exemplar{
+								Label: []*dto.LabelPair{
+									{Name: proto.String(""), Value: proto.String("1234")},
+								},
+								Value:     proto.Float64(1),
+								Timestamp: &timestamppb.Timestamp{Seconds: 1234567890},
+							},
+						},
+					},
+				},
+			},
+			out: `# TYPE http_requests_total counter
+http_requests_total 1027.0
 `,
 		},
 		{
@@ -228,7 +342,7 @@ http_requests_total 1027
 				},
 			},
 			out: `# TYPE http_requests_total counter
-http_requests_total 1027 # {trace_id="1234"} NaN 1234567890
+http_requests_total 1027.0 # {trace_id="1234"} NaN 1234567890
 `,
 		},
 		{
@@ -262,7 +376,7 @@ test_metric 1.23
 				},
 			},
 			out: `# TYPE http_requests_total counter
-http_requests_total 1027
+http_requests_total 1027.0
 `,
 		},
 		{
@@ -282,7 +396,7 @@ http_requests_total 1027
 				},
 			},
 			out: `# TYPE "你好_total" counter
-{"你好_total","🌎"="🌍"} 1027
+{"你好_total","🌎"="🌍"} 1027.0
 `,
 		},
 	}
@@ -304,15 +418,14 @@ http_requests_total 1027
 	}
 }
 
-func TestWriteOpenMetrics20Timestamp_SpecialValues(t *testing.T) {
+func TestWriteOpenMetrics20Timestamp(t *testing.T) {
 	tests := []struct {
 		name string
 		val  float64
 		out  string
 	}{
-		{"NaN", math.NaN(), "NaN"},
-		{"+Inf", math.Inf(+1), "+Inf"},
-		{"-Inf", math.Inf(-1), "-Inf"},
+		{"IntegerTimestamp", 1234567890, "1234567890"},
+		{"SubsecondTimestamp", 1234567890.123, "1234567890.123"},
 	}
 
 	for _, tc := range tests {
@@ -492,6 +605,30 @@ func TestCreateOpenMetrics20_Errors(t *testing.T) {
 			expectedErr: "contains raw newlines",
 		},
 		{
+			name: "NewlineInUnit_LF",
+			in: &dto.MetricFamily{
+				Name: proto.String("test_counter_total"),
+				Type: dto.MetricType_COUNTER.Enum(),
+				Unit: proto.String("seconds\n"),
+				Metric: []*dto.Metric{
+					{Counter: &dto.Counter{Value: proto.Float64(1.0)}},
+				},
+			},
+			expectedErr: "unit \"seconds\\n\" contains raw newlines",
+		},
+		{
+			name: "NewlineInUnit_CR",
+			in: &dto.MetricFamily{
+				Name: proto.String("test_counter_total"),
+				Type: dto.MetricType_COUNTER.Enum(),
+				Unit: proto.String("seconds\r"),
+				Metric: []*dto.Metric{
+					{Counter: &dto.Counter{Value: proto.Float64(1.0)}},
+				},
+			},
+			expectedErr: "unit \"seconds\\r\" contains raw newlines",
+		},
+		{
 			name: "NilMetric",
 			in: &dto.MetricFamily{
 				Name:   proto.String("test_counter_total"),
@@ -532,30 +669,6 @@ func TestCreateOpenMetrics20_Errors(t *testing.T) {
 			},
 			expectedErr: "invalid created timestamp in metric test_counter_total",
 		},
-		{
-			name: "ExemplarInvalidTimestamp",
-			in: &dto.MetricFamily{
-				Name: proto.String("test_counter_total"),
-				Type: dto.MetricType_COUNTER.Enum(),
-				Metric: []*dto.Metric{
-					{
-						Counter: &dto.Counter{
-							Value: proto.Float64(1.0),
-							Exemplar: &dto.Exemplar{
-								Label: []*dto.LabelPair{
-									{Name: proto.String("trace_id"), Value: proto.String("1234")},
-								},
-								Value: proto.Float64(1.0),
-								Timestamp: &timestamppb.Timestamp{
-									Nanos: -1,
-								},
-							},
-						},
-					},
-				},
-			},
-			expectedErr: "has out-of-range nanos",
-		},
 	}
 
 	for _, tc := range tests {
@@ -576,7 +689,7 @@ func TestWriteOpenMetrics20Sample_UseIntValue(t *testing.T) {
 	var buf bytes.Buffer
 	w := enhancedWriter(&buf)
 	metric := &dto.Metric{}
-	n, err := writeOpenMetrics20Sample(w, "test_metric", metric, 0, 123, true, nil)
+	n, err := writeOpenMetrics20Sample(w, "test_metric", metric, 0, 123, true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,7 +727,7 @@ func TestCreateOpenMetrics20_SimpleWriter(t *testing.T) {
 	}
 
 	expected := `# TYPE http_requests_total counter
-http_requests_total 1027
+http_requests_total 1027.0
 `
 	if buf.String() != expected {
 		t.Errorf("expected %q, got %q", expected, buf.String())
